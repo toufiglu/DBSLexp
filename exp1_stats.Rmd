@@ -1,0 +1,371 @@
+---
+title: "exp1_stats"
+author: "Yiming Lu"
+date: "2025-06-24"
+output:
+  pdf_document: default
+  html_document: default
+---
+# setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+source('libraries.R')
+source('gamm_hacks.R') # this is the functions from Soskuthy's tutorial in 2017.
+source('functions.R')
+```
+
+This file contains the statistical analysis performed on experiment 1. The data imported here are already sorted. The file sorting experiment data is titled 'exp1_sort_data.Rmd'. We do all the ploting and stats here.
+
+```{r load-sorted-data}
+pre_test <- read.delim('pre_test_results.txt') %>% rename(prob_p=Response.100)
+pre_test_subjects <- unique(pre_test$subject)
+post_test <- read.delim('post_test_results.txt') %>% filter(subject %in% pre_test_subjects) %>% rename(prob_p=Response.100)
+neutral <- read.delim('neutral_results.txt')
+```
+
+```{r plotting-pretest-stats}
+pre_test_participants <- unique(pre_test$subject)
+
+# save figures for the pre-test results
+for (part in 1:length(pre_test_participants)) {
+  part_id <- pre_test_participants[part]
+  df_part <- pre_test %>% filter(subject==part_id) 
+  
+  get_baseline_plots(df=df_part, par=as.character(part_id), session="pre_test")
+}
+
+# get average results
+pre_test %>% 
+  group_by(VOT, f0) %>% 
+  summarise(prob_p=mean(prob_p), .groups='drop') %>% 
+  get_baseline_plots(par='average', session="pre_test") 
+
+# linear mixed effect model for pre-test
+
+m_pre <- lmer(prob_p ~ VOT * f0 + (1 + VOT * f0 | subject), data=pre_test)
+m_pre_results <- tidy(m_pre) %>% filter(effect=="fixed")
+m_pre_results
+```
+
+```{r plotting-posttest-stats}
+post_test_participants <- unique(post_test$subject)
+
+# save figures for the post-test results
+for (part in 1:length(post_test_participants)) {
+  part_id <- post_test_participants[part]
+  df_part <- post_test %>% filter(subject==part_id) 
+  
+  get_baseline_plots(df=df_part, par=as.character(part_id), session="post_test")
+}
+# get average results
+post_test %>% 
+  group_by(VOT, f0) %>% 
+  summarise(prob_p=mean(prob_p), .groups='drop') %>% 
+  get_baseline_plots(par='average', session="post_test") 
+
+# linear mixed effect model for post-test
+
+m_post <- lmer(prob_p ~ VOT * f0 + (1 + VOT * f0 | subject), data=post_test)
+m_post_results <- tidy(m_post) %>% filter(effect=="fixed")
+m_post_results
+```
+# We start by performing summary statistics and linear mixed effect models for pre/post tests. We found that f0 and VOT both had a significant influence on the VAS response. No significant interactions between VOT and f0 was found.
+
+
+```{r exposure-iterations-plot-trajectory}
+# get data: only test trials, but wouldn't we need to run some stats on the exposure trials as well?
+
+#let us plot the trajectory
+neutral_aver <- neutral %>% 
+  group_by(Display, trial) %>% 
+  summarise(prob_p=mean(prob_p), .groups='drop') %>% 
+  mutate(ID='averaged')
+
+# plot the same for each participant
+neutral_participants <- unique(neutral$ProlificID)
+for (part in 1:length(neutral_participants)) {
+  part_id <- neutral_participants[part]
+  df_part <- neutral %>% filter(ProlificID==part_id) 
+
+  traj_test(df=df_part,block='neutral',par=part_id)
+}
+
+traj_test(df=neutral_aver,block='neutral',par='average')
+```
+
+```{r GAMM-exposure}
+# treatment coding
+df_neutral <- neutral %>% 
+    mutate(Display_num = str_extract(Display, "\\d+")) %>% 
+    mutate(Display = as.numeric(Display_num)) %>% 
+    mutate(trial=factor(trial),
+           ID=as.factor(ProlificID))
+contrasts(df_neutral$trial) <- 'contr.treatment'
+df_neutral <- within(df_neutral, trial <- relevel(trial, ref='lowf0'))
+df_neutral$trial <- as.ordered(df_neutral$trial) # this is essential
+# we want to set the reference level as low f0.
+
+# Step 1: compare models with different fixed terms (parametric/smooth, impact of f0)
+m.neutral1 <- bam(prob_p ~ 
+          trial #non-smooth term
+          + s(Display) #reference smooth
+          + s(Display, by=trial) # difference smooth
+          ,
+          data=df_neutral,
+          method='ML') # this is the model with f0 as a fixed non-smooth effect and a difference smooth. 
+summary(m.neutral1)
+
+m.neutral2 <- bam(prob_p ~ 
+          + s(Display)
+          ,
+          data=df_neutral,
+          method='ML') # what happens if f0 is removed from the parametric term and the smooth term?
+compareML(m.neutral1, m.neutral2) 
+
+# Comparing the model with a non-smooth fixed effect of f0 but not a difference smooth
+m.neutral3 <- bam(prob_p ~ 
+          trial
+          + s(Display)
+          ,
+          data=df_neutral,
+          method='ML')
+
+compareML(m.neutral1, m.neutral3) 
+# in this case, not a significant difference was found through chi-square tests/AIC
+# Conclusion: m.neutral3 (the model including a parametric term of f0 without a difference smooth) is the best.
+
+# Step 2: add random effect structure
+# but still, we need a comparison between different models wity random effects to find the model with the lowest AIC
+m.neutral.ran.intercept <- bam(prob_p ~ 
+          trial #non-smooth term
+          + s(Display) #reference smooth
+          + s(ID, bs='re') # random intercept
+          , # but this model might be unnecessarily complex
+          data=df_neutral,
+          method='ML')
+
+m.neutral.ran.slope <- bam(prob_p ~ 
+          trial #non-smooth term
+          + s(Display) #reference smooth
+          + s(ID, Display, bs='re') #random slope
+          , # but this model might be unnecessarily complex
+          data=df_neutral,
+          method='ML')
+
+m.neutral.ran.smooth <- bam(prob_p ~ 
+          trial #non-smooth term
+          + s(Display) #reference smooth
+          + s(Display, ID, bs='fs', xt='cr', m=1, k=10) # random smooths
+          , # but this model might be unnecessarily complex, we will do a model comparison
+          data=df_neutral,
+          method='ML')
+# compare through AIC: because these models are not nested.
+AIC(m.neutral.ran.intercept, m.neutral.ran.slope, m.neutral.ran.smooth, m.neutral3)
+
+# Conclusion: random smooth model has the lowest AIC
+
+# create an AR1 model
+# 1. mark the starting point
+df_neutral$start.event <- df_neutral$Display == 1
+# 2. estimate roughly the degree of autocorrelation
+r1 <- start_value_rho(m.neutral3)
+# 3. create an AR model
+m.neutral.AR <- bam(prob_p ~ 
+          trial #non-smooth term
+          + s(Display) #reference smooth
+          + s(Display, by=trial) # difference smooth
+          ,
+          data=df_neutral,
+          method='fREML',
+          rho=r1,
+          AR.start=df_neutral$start.event) # the same as m.neutral1, but with residue error autocorrelation 
+
+summary(m.neutral.AR)
+acf_plot(resid(m.neutral.AR), split_by=list(df_neutral$ID))
+acf_resid(m.neutral.AR, split_pred = "(AR.start)") 
+# it seems that the AR1 model reduced residue autocorrelation; why is the residue 0? It can't possibly be right.
+
+# however, the random smooth model seems to capture a higher degree of variance, which one should we use?
+AIC(m.neutral.AR, m.neutral.ran.smooth)
+# Conclusion: the random smooth model is the best; it has lower AIC and explains more variance than the AR1 model
+
+
+# get the acf plots for the best model
+summary(m.neutral.ran.smooth)
+acf_plot(resid(m.neutral.ran.smooth, split_by=list(ID)))
+acf_resid(m.neutral.ran.smooth, split_pred=c('ID'))
+
+# get the diff between two f0 levels in the best model
+# we want to plot the differences between these two levels
+plot_smooth(m.neutral.ran.smooth,
+            view='Display',
+            plot_all='trial',
+            rug=F,
+            rm.ranef=T
+            )
+
+get_pred <- plot_smooth(m.neutral.ran.smooth,
+            view='Display',
+            plot_all='trial',
+            rug=F,
+            rm.ranef=T
+            )$fv
+
+plot_diff(m.neutral.ran.smooth,
+          view='Display',
+          comp=list(trial=c("highf0","lowf0"))
+)
+
+p_traj_overlay <- ggplot(data=df_neutral, aes(x=Display, y=prob_p, group = trial, color = trial), alpha=0.5) +
+    scale_color_manual(values = c("highf0"='blue', "lowf0"='orange')) +
+    geom_point() +
+    geom_line(data=get_pred, aes(x=Display, y=fit, group = trial, color = trial), size=2, inherit.aes=F) + 
+    geom_ribbon(data=get_pred, aes(x=Display, ymin = ll, ymax = ul, group = trial), alpha=.6, fill='grey', inherit.aes=F) +
+    scale_y_continuous(breaks=seq(0,100,by=25)) +
+    xlab('Iteration') +
+    ylab('Probability of voiceless response') + 
+    theme(
+      panel.background = element_rect(fill='white'),
+      panel.grid.major = element_line(color='black', linewidth=0.3),
+      legend.text = element_text(size=5),
+      legend.title = element_text(size=5),
+      legend.key.height = unit(0.4, "cm"),
+      legend.key.width = unit(0.3, "cm"),
+      axis.text.x = element_text(size=5),
+      axis.text.y = element_text(size=5)
+    )
+
+p_traj_overlay
+
+ggsave(glue("./neutral_figures/trajectory_m_pred.png"), plot=p_traj_overlay, width=1500, height=1000, dpi=300, units = "px")
+```
+# We conclude from the generalized additive mixed effect model that f0 exerts an effect on the overall VAS response, but this effect does not change with exposure. The difference smooth model does not explain more variance than the model with the non-smooth parameter of f0 only. That is, the f0 cue weight does not change over 3 neutral blocks. Regarding random effect, the random smooth model outperform the random intercept and slope models. The line in the above plot shows model prediction, whereas the shade shows the confidence interval.
+
+# change of secondary cue before and after exposure
+```{r lmer-theta-before-after}
+pre_theta <- read_delim("./pre_all.txt") %>% mutate(time='before')
+post_theta <- read_delim("./post_all.txt") %>% mutate(time='after')
+pre_theta <- pre_theta %>% filter(subject %in% post_theta$subject)
+theta <- rbind(pre_theta, post_theta) %>% mutate(time=factor(time))
+
+contrasts(theta$time) <- 'contr.treatment'
+theta <- within(theta, time <- relevel(time, ref='before'))
+theta$time <- as.ordered(theta$time) 
+
+
+m_theta <- lmer(Theta ~ time + (1|subject), data=theta) # run this when we actually get the data back
+tidy(m_theta)
+```
+# We found no significant differences in theta between pre-test and post-test. That is, no re-weighting can be detected after exposure.
+
+# relationship between gradience and theta (secondary cue)
+```{r lmer-slope-theta}
+# use data from pre-test only
+theta <- theta %>% mutate(Slope=log(Slope), Theta=90-(270-Theta)) %>% filter(R > 0.9)
+m_theta <- lm(Slope ~ Theta, data=theta) # but is this right? 
+m_theta_null <- lm(Slope ~ 1, data=theta)
+anova(m_theta_null, m_theta)
+
+# No relationship between slope and theta?
+ggplot(data=theta, aes(x=Slope, y=Theta)) +
+  geom_point()
+```
+
+# Surprisingly, we also did not find a relationship between gradience (slope) and secondary cue use (theta). But this could be due to our smaller number of participants.
+
+# relationship between gradience and adaptation
+Below we perform some exploratory analysis for the relationship between gradiency and adaptation 
+# 1. adaptation within exposure block
+```{r exposure-slope-adaptation}
+# get slope from pre-test and get adaptation between 1st and 30th iterations
+neutral_compa <-  neutral %>% 
+  filter(Display %in% c("Neutral 1", "Neutral 30")) %>% 
+  group_by(Display, ProlificID) %>% 
+  mutate(diff_prob_p=prob_p[1]-prob_p[2]) %>% 
+  ungroup() %>% 
+  dplyr::select(ProlificID, Display, diff_prob_p) %>% 
+  distinct() %>% 
+  group_by(ProlificID) %>% 
+  mutate(learning=diff_prob_p[2]-diff_prob_p[1]) %>% #compare the diff in high-low f0 responses before and after exposure 
+  dplyr::select(ProlificID, learning) %>% 
+  distinct() %>% 
+  filter(!is.na(learning)) %>% 
+  rename(subject=ProlificID)
+
+df_adaptation <- pre_theta %>% 
+  left_join(neutral_compa, by='subject')
+
+m_adaptation <- lm(learning ~ Slope,data=df_adaptation) # but does this make sense? think harder!
+
+tidy(m_adaptation)
+
+ggplot(data=df_adaptation, aes(x=Slope, y=learning)) +
+  geom_point()
+```
+# We did not find a significant relationship between adaptation (exemplified by the changes in the difference between high/low f0 test trial VAS response) and gradience (slope)
+
+# 2. adaptation for change in theta
+```{r theta-change-gradience}
+theta_compa <- 
+  theta %>% 
+  group_by(subject) %>% 
+  mutate(theta_diff = Theta[2]-Theta[1]) 
+
+m_adap_theta <- lm(theta_diff ~ Slope, data=theta_compa)
+
+tidy(m_adap_theta)
+
+ggplot(data=theta_compa, aes(x=Slope, y=theta_diff)) +
+  geom_point()
+```
+# We also did not find a significant relationship between adaptation (change in theta before and after exposure) and gradience (slope).
+
+# relationship between variability and theta (secondary cue)
+```{r get-variability}
+trial_pre <- read_delim('trial_pre_all.txt')
+trial_post <- read_delim('trial_post_all.txt')
+trial_pre <- trial_pre %>% filter(ProlificID %in% trial_post$ProlificID)
+
+var_pre <- get_var(trial_pre) %>% left_join(pre_theta, by='subject')
+var_post <- get_var(trial_post) %>% left_join(post_theta, by='subject')
+
+m_var_theta <- lm(sum_mse ~ Theta, data=var_pre)
+summary(m_var_theta)
+
+ggplot(data=var_pre, aes(x=sum_mse, y=Theta)) +
+  geom_point()
+``` 
+# We found a marginally significant relationship between variability and secondary cue use (theta). It seems that larger variability corresponds with a stronger primary cue.
+
+
+# relationship between variability and adaptation
+# theta diff
+```{r theta_difference_explained_by_variability}
+theta_var <- theta_compa %>% 
+  ungroup() %>% 
+  dplyr::select(subject, theta_diff) %>% 
+  distinct() %>% 
+  left_join(var_pre, by='subject')
+
+m_adap_var <- lm(theta_diff ~ sum_mse, data=theta_var)
+tidy(m_adap_var)
+
+ggplot(data=theta_var, aes(x=sum_mse, y=theta_diff)) +
+  geom_point()
+```
+# Variability does not explain adaptation, as measured by changes in theta.
+
+```{r learning_within_exposure_explained_by_variability}
+neutral_diff_var <- neutral_compa %>% 
+  ungroup() %>%
+  left_join(var_pre, by='subject')
+
+m_neutral_adap_var <- lm(learning ~ sum_mse, data=neutral_diff_var)
+
+summary(m_neutral_adap_var)
+
+ggplot(data=neutral_diff_var, aes(x=sum_mse, y=learning)) +
+  geom_point()
+```
+
+# Also, variability does not explain adaptation, as measured by changes in the difference between high/low f0 test trial VAS responses.
