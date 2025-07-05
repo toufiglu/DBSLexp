@@ -1,0 +1,78 @@
+---
+title: "exp1_data_sorting"
+author: "Yiming Lu"
+date: "2025-07-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+source('libraries.R')
+source('functions.R')
+```
+
+This file sorts the experiment 1 data. Data were collected over two sessions. We exclude data from the two sessions separately. Functions are written in 'functions.R'
+
+# session 1
+```{r load-data-session1}
+# get prolificID to facilitate rejection
+session1_ID <- get_ProlificID(session_name='session1', exp='exp1')
+
+# find participants who extensively passed trials
+session1_raw <- read_csv("./session1/exp1_session1_results.csv") %>% 
+  process_pre_test_df()
+
+# if a participant missed more than 10% of all trials: 51 trials, we reject the participant
+session1_missed <- count_missed_trials(session1_raw)
+session1_missed
+# 675f4880d357baddb38a9c2c: missed half of the experiment (153 trials) 
+# 67da14ccd38d6a25f0c0c531, 67b8f459f36ac348b98d6cad: almost uniform probability across all trials.
+session1_missing_trial_excluded <- session1_raw %>% 
+  filter(!ProlificID %in% c("67da14ccd38d6a25f0c0c531","675f4880d357baddb38a9c2c", "67b8f459f36ac348b98d6cad")) %>% 
+  filter_needed_trials()
+
+session1_probe <- get_false_probe_trials(session1_missing_trial_excluded)
+session1_probe
+# all participants got probe trials right
+
+pre_test <- process_session_results(session1_missing_trial_excluded) %>% format_pre_post_curve_fitter()
+
+write_delim(pre_test, "pre_test_results.txt", delim="\t")
+
+## get prolific id to include for the next experiment.
+session1_participants_eligible <- 
+  pre_test %>% dplyr::select(subject) %>% distinct() %>% pull(subject)
+```
+
+# session 2
+```{r post-test-results-figures, warning=FALSE}
+session2_ID <- get_ProlificID(session_name='session2', exp='exp1')
+
+session2 <- read_csv("./session2/exp1_session2_results.csv") %>% 
+  process_session2_df(exposure='Neutral')
+
+# if a participant missed more than 10% of all trials: 51 trials, we reject the participant
+session2_missed <- count_missed_trials(session2) 
+session2_missed
+
+session2_results <- session2 %>% filter_needed_trials()
+
+session2_probe <- get_false_probe_trials(session2_results) 
+session2_probe
+# Again, the participants responded correctly for the probe trials.
+
+post_test_results <- session2_results %>% 
+  filter(str_detect(Display, 'post')) %>% 
+  process_session_results() %>% 
+  format_pre_post_curve_fitter()
+
+write_delim(post_test_results, "post_test_results.txt", delim="\t")
+
+neutral_results <- session2_results %>% 
+  filter(str_detect(Display, 'Neutral')) %>% 
+  format_exposure_trials()
+
+write_delim(neutral_results, "neutral_results.txt", delim='\t')
+```
+
